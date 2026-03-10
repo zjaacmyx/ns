@@ -62,8 +62,7 @@ ns2     IN      A       ${IPAddrNS2}
 *       IN      A       ${WildRecord}
 mail    IN      CNAME   smtp.google.com.
 
-@       IN      MX  10  mail..${DOMAIN}.
-# @       IN      MX  10  mail.${DOMAIN}.
+@       IN      MX  10  mail.${DOMAIN}.
 @       IN      TXT     "v=spf1 redirect=_spf.google.com"
 _dmarc  IN      TXT     "v=DMARC1; p=quarantine; rua=mailto:dns-admin.google.com."
 @       IN      TXT     "v=spf1 redirect=_spf.${DOMAIN}"
