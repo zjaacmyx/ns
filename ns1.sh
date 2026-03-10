@@ -1,79 +1,151 @@
 #!/bin/bash
 
+# ==========================================
+# 辅助函数: 根据 CIDR 随机生成一个 IP
+# ==========================================
 randCIDR() {
-  cidr="${1:-}"
-  [ -n "$cidr" ] || return
-  IFS=/ read -r ip prefix <<<"$cidr"
-  IFS=. read -r o1 o2 o3 o4 <<<"$ip"
-  ipInt="$(( (o1 << 24) | (o2 << 16) | (o3 << 8) | o4 ))"
-  if (( prefix == 0 )); then
-    mask=0
-  else
-    mask=$(( (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF ))
-  fi
-  base=$(( ipInt & mask ))
-  if (( prefix == 32 )); then
-    size=1
-  else
-    size=$(( 1 << (32 - prefix) ))
-  fi
-  if (( size >= 3 )); then
-    start=1
-    end=$(( size - 2 ))
-  else
-    start=0
-    end=$(( size - 1 ))
-  fi
-  span=$(( end - start + 1 ))
-  randVal=$(( (RANDOM << 15) ^ RANDOM ))
-  offset=$(( (RANDOM % $span) + 1 ))
-  final=$(( base + offset ))
-  printf "%d.%d.%d.%d" $(( (final >> 24) & 0xFF )) $(( (final >> 16) & 0xFF )) $(( (final >> 8)  & 0xFF )) $(( final & 0xFF ))
+    local cidr=$1
+    local ip=${cidr%/*}
+    local prefix=${cidr#*/}
+
+    # 将 IP 转换为整数
+    local IFS=.
+    read -r i1 i2 i3 i4 <<< "$ip"
+    local ip_int=$(( (i1 << 24) + (i2 << 16) + (i3 << 8) + i4 ))
+    
+    # 计算网络号和可用主机数
+    local mask=$(( 0xFFFFFFFF << (32 - prefix) ))
+    local net_int=$(( ip_int & mask ))
+    local hosts=$(( 2 ** (32 - prefix) ))
+
+    # 使用 /dev/urandom 生成高质量随机偏移量 (排除网络号和广播地址)
+    local rand_offset=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+    rand_offset=$(( rand_offset % (hosts - 2) + 1 ))
+
+    # 组合出最终的随机 IP 整数并转换回 IPv4 格式
+    local rand_ip_int=$(( net_int + rand_offset ))
+    echo "$(( (rand_ip_int >> 24) & 255 )).$(( (rand_ip_int >> 16) & 255 )).$(( (rand_ip_int >> 8) & 255 )).$(( rand_ip_int & 255 ))"
 }
 
+# 获取传入的域名参数
 DOMAIN="${1:-}"
-IPAddrNS1=`wget -qO- checkip.amazonaws.com |grep -o '[0-9\.]*'`
-IPAddrNS2=`randCIDR "172.217.0.0/16"`
-WildRecord="47.86.42.141"
-MailIP="144.24.17.237"  # <-- 新增：独立配置邮局 IP
+if [ -z "$DOMAIN" ]; then
+    echo "错误: 未提供域名！"
+    echo "用法: bash ns1.sh <你的域名> (例如: bash ns1.sh tscd.surf)"
+    exit 1
+fi
 
-[ -n "$DOMAIN" ] && [ -n "$IPAddrNS1" ] && [ -n "$IPAddrNS2" ] || exit 1
+# 自动获取本机公网 IP (作为 ns1 DNS 解析服务器的 IP)
+LocalIP=$(wget -qO- checkip.amazonaws.com | grep -o '[0-9\.]*')
+if [ -z "$LocalIP" ]; then
+    echo "错误: 无法获取本机 IP，请检查网络连接！"
+    exit 1
+fi
 
-DEBIAN_FRONTEND=noninteractive apt-get -qqy update
-DEBIAN_FRONTEND=noninteractive apt-get -qqy install bind9 bind9utils net-tools dnsutils
+# 从指定 CIDR 随机生成 ns2 的 IP
+IPAddrNS2=$(randCIDR "172.217.0.0/16")
 
+# 邮局服务器的 IP (用于处理邮件和网站流量)
+MailIP="8.208.90.25"
+
+echo "=========================================="
+echo "开始配置 DNS 权威服务器..."
+echo "目标域名: ${DOMAIN}"
+echo "本机 IP (仅作 NS1 解析): ${LocalIP}"
+echo "随机生成的备用 IP (NS2): ${IPAddrNS2}"
+echo "邮局/业务 IP (Web & Mail): ${MailIP}"
+echo "=========================================="
+
+# 安装依赖
+DEBIAN_FRONTEND=noninteractive apt-get update -qqy
+DEBIAN_FRONTEND=noninteractive apt-get install bind9 bind9utils net-tools dnsutils -qqy
+
+# 1. 配置 options，隐藏指纹，禁用递归（权威服务器标配）
+cat <<CONFIG > /etc/bind/named.conf.options
+options {
+    directory "/var/cache/bind";
+    recursion no;
+    allow-query { any; };
+    # 隐藏 BIND 版本和服务器身份，防风控探测
+    version "none";
+    hostname "none";
+    server-id "none";
+    listen-on-v6 { any; };
+};
+CONFIG
+
+# 2. 配置 local zone
 mkdir -p /etc/bind/zones
-echo -ne "options {\n\tdirectory \"/var/cache/bind\";\n\trecursion no;\n\tlisten-on-v6 { none; };\n\tallow-query { any; };\n\tdnssec-validation auto;\n};\n\n" >/etc/bind/named.conf.options
-grep -q "\"/etc/bind/zones/${DOMAIN}\";" /etc/bind/named.conf.local
-[ $? -ne 0 ] && echo -ne "zone \"${DOMAIN}\" {\n    type master;\n    file \"/etc/bind/zones/${DOMAIN}\";\n};\n\n" |tee -a /etc/bind/named.conf.local
+zoneFile="/etc/bind/zones/db.${DOMAIN}"
 
-zoneFile="/etc/bind/zones/${DOMAIN}"
-[ -f "${zoneFile}" ] && SERIAL=`cat "${zoneFile}" |grep "^@[[:space:]]*IN[[:space:]]*SOA[[:space:]]*" |grep -o '(.*)' |grep -o '[0-9]*' |head -n1` || SERIAL=`date +%Y%m%d00`
-SERIAL=$((SERIAL+1))
+grep -q "\"/etc/bind/zones/db.${DOMAIN}\";" /etc/bind/named.conf.local
+if [ $? -ne 0 ]; then
+    cat <<CONFIG >> /etc/bind/named.conf.local
+zone "${DOMAIN}" {
+    type master;
+    file "${zoneFile}";
+    # 允许从服务器同步数据 (由于 ns2 是随机的，这里按需配置)
+    allow-transfer { ${IPAddrNS2}; };
+};
+CONFIG
+fi
 
-# --- 重写 Zone 文件内容 ---
-cat << EOF_ZONE > "${zoneFile}"
-\$TTL    300
-@       IN      SOA     ns1.${DOMAIN}. admin.${DOMAIN}. ( ${SERIAL} 21600 1800 1800 60 )
+# 生成 Serial 号 (当前日期+01)
+SERIAL=$(date +%Y%m%d01)
+
+# 3. 编写 Zone 数据文件
+cat <<DATA > "${zoneFile}"
+\$TTL    86400
+@       IN      SOA     ns1.${DOMAIN}. admin.${DOMAIN}. (
+                              ${SERIAL}  ; Serial
+                              10800      ; Refresh
+                              3600       ; Retry
+                              604800     ; Expire
+                              3600 )     ; Negative Cache TTL
+
+; --- 权威 NS 记录 ---
 @       IN      NS      ns1.${DOMAIN}.
 @       IN      NS      ns2.${DOMAIN}.
 
-ns1     IN      A       ${IPAddrNS1}
+; --- NS 服务器自身的 IP ---
+ns1     IN      A       ${LocalIP}
 ns2     IN      A       ${IPAddrNS2}
-@       IN      A       ${IPAddrNS1}
-* IN      A       ${WildRecord}
 
-; --- 邮件服务器解析记录 ---
+; --- 核心 A 记录（主域名和泛解析指向邮局 IP） ---
+@       IN      A       ${MailIP}
+* IN      A       ${MailIP}
+www     IN      A       ${MailIP}
+
+; --- 邮件相关配置 (指向邮局 IP) ---
 mail    IN      A       ${MailIP}
 @       IN      MX  10  mail.${DOMAIN}.
+* IN      MX  10  mail.${DOMAIN}.
 
-; --- 安全策略记录 (SPF & DMARC) ---
-@       IN      TXT     "v=spf1 mx a ip4:${MailIP} ~all"
+; --- 安全策略 (SPF & DMARC) ---
+@       IN      TXT     "v=spf1 a mx ip4:${MailIP} ~all"
 _dmarc  IN      TXT     "v=DMARC1; p=quarantine; rua=mailto:admin@${DOMAIN}."
-EOF_ZONE
+DATA
 
-# chown -R bind:bind /etc/bind/zones
-chmod -R 777 /etc/bind/zones
-echo -ne "Domain: ${DOMAIN}\nIPAddrNS1: ${IPAddrNS1}\nIPAddrNS2: ${IPAddrNS2}\nMailIP: ${MailIP}\n\n"
+# 修正权限
+chown -R bind:bind /etc/bind/zones
+chmod -R 755 /etc/bind/zones
+
+# 如果有防火墙，开放 53 端口
+if command -v ufw > /dev/null; then
+    ufw allow 53/tcp >/dev/null 2>&1
+    ufw allow 53/udp >/dev/null 2>&1
+fi
+
+echo -e "\n正在检查 Zone 文件语法..."
 named-checkzone "${DOMAIN}" "${zoneFile}"
-systemctl restart bind9
+
+# 重启服务并设置自启
+systemctl enable named
+systemctl restart named
+
+echo "----------------------------------------"
+echo "✅ Master NS 配置完成！"
+echo "请前往域名注册商，将域名的 NS 服务器设置为："
+echo "ns1.${DOMAIN}  ->  ${LocalIP} (本机)"
+echo "ns2.${DOMAIN}  ->  ${IPAddrNS2} (随机生成的 Google IP 段)"
+echo "----------------------------------------"
