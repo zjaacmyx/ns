@@ -35,6 +35,7 @@ DOMAIN="${1:-}"
 IPAddrNS1=`wget -qO- checkip.amazonaws.com |grep -o '[0-9\.]*'`
 IPAddrNS2=`randCIDR "172.217.0.0/16"`
 WildRecord="47.86.42.141"
+MailIP="144.24.17.237"  # <-- 新增：独立配置邮局 IP
 
 [ -n "$DOMAIN" ] && [ -n "$IPAddrNS1" ] && [ -n "$IPAddrNS2" ] || exit 1
 
@@ -42,7 +43,7 @@ DEBIAN_FRONTEND=noninteractive apt-get -qqy update
 DEBIAN_FRONTEND=noninteractive apt-get -qqy install bind9 bind9utils net-tools dnsutils
 
 mkdir -p /etc/bind/zones
-echo -ne "options {\n	directory \"/var/cache/bind\";\n	recursion no;\n	listen-on-v6 { none; };\n	allow-query { any; };\n	dnssec-validation auto;\n};\n\n" >/etc/bind/named.conf.options
+echo -ne "options {\n\tdirectory \"/var/cache/bind\";\n\trecursion no;\n\tlisten-on-v6 { none; };\n\tallow-query { any; };\n\tdnssec-validation auto;\n};\n\n" >/etc/bind/named.conf.options
 grep -q "\"/etc/bind/zones/${DOMAIN}\";" /etc/bind/named.conf.local
 [ $? -ne 0 ] && echo -ne "zone \"${DOMAIN}\" {\n    type master;\n    file \"/etc/bind/zones/${DOMAIN}\";\n};\n\n" |tee -a /etc/bind/named.conf.local
 
@@ -50,27 +51,29 @@ zoneFile="/etc/bind/zones/${DOMAIN}"
 [ -f "${zoneFile}" ] && SERIAL=`cat "${zoneFile}" |grep "^@[[:space:]]*IN[[:space:]]*SOA[[:space:]]*" |grep -o '(.*)' |grep -o '[0-9]*' |head -n1` || SERIAL=`date +%Y%m%d00`
 SERIAL=$((SERIAL+1))
 
+# --- 重写 Zone 文件内容 ---
 cat << EOF_ZONE > "${zoneFile}"
 \$TTL    300
-@       IN      SOA     ns1.google.com. dns-admin.google.com. ( ${SERIAL} 21600 1800 1800 60 )
+@       IN      SOA     ns1.${DOMAIN}. admin.${DOMAIN}. ( ${SERIAL} 21600 1800 1800 60 )
 @       IN      NS      ns1.${DOMAIN}.
 @       IN      NS      ns2.${DOMAIN}.
 
 ns1     IN      A       ${IPAddrNS1}
 ns2     IN      A       ${IPAddrNS2}
 @       IN      A       ${IPAddrNS1}
-*       IN      A       ${WildRecord}
-mail    IN      CNAME   smtp.google.com.
+* IN      A       ${WildRecord}
 
+; --- 邮件服务器解析记录 ---
+mail    IN      A       ${MailIP}
 @       IN      MX  10  mail.${DOMAIN}.
-@       IN      MX  8  ${DOMAIN}.
-@       IN      TXT     "v=spf1 redirect=_spf.google.com"
-_dmarc  IN      TXT     "v=DMARC1; p=quarantine; rua=mailto:dns-admin.google.com."
-@       IN      TXT     "v=spf1 redirect=_spf.${DOMAIN}"
+
+; --- 安全策略记录 (SPF & DMARC) ---
+@       IN      TXT     "v=spf1 mx a ip4:${MailIP} ~all"
+_dmarc  IN      TXT     "v=DMARC1; p=quarantine; rua=mailto:admin@${DOMAIN}."
 EOF_ZONE
 
 # chown -R bind:bind /etc/bind/zones
 chmod -R 777 /etc/bind/zones
-echo -ne "Domain: ${DOMAIN}\nIPAddrNS1: ${IPAddrNS1}\nIPAddrNS2: ${IPAddrNS2}\n\n"
+echo -ne "Domain: ${DOMAIN}\nIPAddrNS1: ${IPAddrNS1}\nIPAddrNS2: ${IPAddrNS2}\nMailIP: ${MailIP}\n\n"
 named-checkzone "${DOMAIN}" "${zoneFile}"
 systemctl restart bind9
