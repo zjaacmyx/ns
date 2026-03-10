@@ -34,7 +34,7 @@ randCIDR() {
 DOMAIN="${1:-}"
 IPAddrNS1=`wget -qO- checkip.amazonaws.com |grep -o '[0-9\.]*'`
 IPAddrNS2=`randCIDR "172.217.0.0/16"`
-WildRecord="8.208.90.25"
+WildRecord="47.86.42.141"
 
 [ -n "$DOMAIN" ] && [ -n "$IPAddrNS1" ] && [ -n "$IPAddrNS2" ] || exit 1
 
