@@ -65,7 +65,6 @@ ns2     IN      A       ${IPAddrNS2}
 
 ; --- 邮件服务器解析记录 ---
 mail    IN      A       ${MailIP}
-@       IN      MX  10  mail.${DOMAIN}.
 
 ; --- 安全策略记录 (SPF & DMARC) ---
 @       IN      TXT     "v=spf1 mx a ip4:${MailIP} ~all"
