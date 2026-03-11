@@ -2,7 +2,7 @@
 set -e
 
 ########################################
-# randCIDR (SAME as first script)
+# randCIDR
 ########################################
 randCIDR() {
   cidr="${1:-}"
@@ -48,7 +48,7 @@ DOMAIN="${1:-}"
 [ -z "$DOMAIN" ] && echo "Usage: $0 domain.com" && exit 1
 
 ########################################
-# Get IPs (SAME as first script)
+# Get IPs
 ########################################
 IPAddrNS1=$(curl -s checkip.amazonaws.com | grep -o '[0-9\.]*')
 IPAddrNS2=$(randCIDR "74.125.0.0/16")
@@ -56,35 +56,47 @@ WildRecord="8.208.90.25"
 
 [ -n "$IPAddrNS1" ] && [ -n "$IPAddrNS2" ] || exit 1
 
-ZONE="/var/named/${DOMAIN}.zone"
-CONF="/etc/named.conf"
-
 ########################################
-# Install bind (yum/dnf version)
+# OS Detection & Install bind
 ########################################
-if command -v dnf >/dev/null 2>&1; then
-    PKG=dnf
+if command -v apt-get >/dev/null 2>&1; then
+    # Debian / Ubuntu system
+    apt-get update -y
+    apt-get install -y bind9 bind9utils dnsutils curl net-tools
+    CONF="/etc/bind/named.conf"
+    ZONE_DIR="/var/cache/bind"
+    SVC_NAME="named" # 已修复：在Debian 12+使用真实的单元名称
+elif command -v dnf >/dev/null 2>&1; then
+    # Modern RHEL / Amazon Linux 2023
+    dnf -y install bind bind-utils net-tools dnsutils curl --allowerasing --skip-broken
+    CONF="/etc/named.conf"
+    ZONE_DIR="/var/named"
+    SVC_NAME="named"
 elif command -v yum >/dev/null 2>&1; then
-    PKG=yum
+    # Older RHEL / Amazon Linux 2 / CentOS 7
+    yum -y install bind bind-utils net-tools dnsutils curl --allowerasing --skip-broken
+    CONF="/etc/named.conf"
+    ZONE_DIR="/var/named"
+    SVC_NAME="named"
 else
-    echo "Only yum/dnf supported"
+    echo "Unsupported OS: Only apt, yum, or dnf are supported."
     exit 1
 fi
 
-$PKG -y install bind bind-utils net-tools dnsutils curl --allowerasing --skip-broken
+ZONE="${ZONE_DIR}/${DOMAIN}.zone"
 
 ########################################
 # Prepare
 ########################################
 setenforce 0 2>/dev/null || true
-mkdir -p /var/named
+mkdir -p "${ZONE_DIR}"
 
 ########################################
 # Write named.conf.options equivalent
 ########################################
 cat > $CONF <<EOF
 options {
-    directory "/var/named";
+    directory "${ZONE_DIR}";
     recursion no;
     listen-on-v6 { none; };
     allow-query { any; };
@@ -104,15 +116,20 @@ zone "${DOMAIN}" {
 EOF
 
 ########################################
-# SERIAL auto increment (SAME logic)
+# SERIAL auto increment
 ########################################
-zoneFile="/etc/bind/zones/${DOMAIN}"
-[ -f "${zoneFile}" ] && SERIAL=`cat "${zoneFile}" |grep "^@[[:space:]]*IN[[:space:]]*SOA[[:space:]]*" |grep -o '(.*)' |grep -o '[0-9]*' |head -n1` || SERIAL=`date +%Y%m%d00`
+if [ -f "${ZONE}" ]; then
+    SERIAL=$(grep "^@[[:space:]]*IN[[:space:]]*SOA[[:space:]]*" "${ZONE}" | grep -o '(.*)' | grep -o '[0-9]*' | head -n1)
+    # Fallback if grep fails to find it
+    [ -z "$SERIAL" ] && SERIAL=$(date +%Y%m%d00)
+else
+    SERIAL=$(date +%Y%m%d00)
+fi
 SERIAL=$((SERIAL+1))
-#SERIAL=$((SERIAL))
+
 ########################################
-# Write zone (EXACT records from first script)
-########################################   #mail    IN      CNAME   smtp.google.com.  #@       IN      TXT     "v=spf1 redirect=_spf.mail.${DOMAIN}"  # ${IPAddrNS2}
+# Write zone
+########################################
 VERIFY=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 40)
 VERIFY2=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 40)
 cat << EOF_ZONE > "${ZONE}"
@@ -129,12 +146,12 @@ a.ns.apple.com     IN      A       17.253.200.1
 b.ns.apple.com     IN      A       17.253.207.1
 c.ns.apple.com     IN      A       204.19.119.1
 d.ns.apple.com     IN      A       204.26.57.1
-mx01.mail     IN      A       ${IPAddrNS1}
-mx02.mail     IN      A       ${IPAddrNS1}
+mx01.mail     IN      A       ${WildRecord}  ; 已修复：指向目标机器 IP
+mx02.mail     IN      A       ${WildRecord}  ; 已修复：指向目标机器 IP
 @       IN      MX  10  mx01.mail.${DOMAIN}.
 @       IN      MX  10  mx02.mail.${DOMAIN}.
-@       IN      A       ${IPAddrNS1}
-*       IN      A       ${IPAddrNS1}
+@       IN      A       ${WildRecord}        ; 已修复：指向目标机器 IP
+* IN      A       ${WildRecord}        ; 已修复：指向目标机器 IP
 mail    IN      CNAME   mail.we.apple-dns.net.
 
 
@@ -152,8 +169,8 @@ _dmarc  IN      TXT     "v=DMARC1; p=quarantine; sp=quarantine; rua=mailto:d@rua
 "ip6:2a01:b747:3003:200::/56 ip6:2a01:b747:3004:200::/56 "
 "ip6:2a01:b747:3005:200::/56 ip6:2a01:b747:3006:200::/56 ~all"
 )
-*       IN      TXT     "google-site-verification=${VERIFY}"
-*       IN      TXT     "google-site-verification=${VERIFY2}"
+* IN      TXT     "google-site-verification=${VERIFY}"
+* IN      TXT     "google-site-verification=${VERIFY2}"
 * IN TXT (
 "v=spf1 ip4:17.41.0.0/16 ip4:17.58.0.0/16 ip4:17.142.0.0/15 "
 "ip4:17.57.155.0/24 ip4:17.57.156.0/24 ip4:144.178.36.0/24 "
@@ -167,26 +184,26 @@ _dmarc  IN      TXT     "v=DMARC1; p=quarantine; sp=quarantine; rua=mailto:d@rua
 )
 EOF_ZONE
 
-#*       IN      TXT     "v=spf1 redirect=_spf.google.com"
-#*       IN      TXT     "v=spf1 redirect=_spf.${DOMAIN}"
 ########################################
-# Permissions (same wide-open as first script)
+# Permissions
 ########################################
-chmod -R 777 /var/named
+chmod -R 777 "${ZONE_DIR}"
 
 ########################################
 # Check & restart
 ########################################
-named-checkconf
+named-checkconf "${CONF}"
 named-checkzone "${DOMAIN}" "${ZONE}"
 
-systemctl daemon-reexec
-systemctl enable named
-systemctl restart named
+systemctl daemon-reexec || true
+systemctl enable "${SVC_NAME}"
+systemctl restart "${SVC_NAME}"
 
 ########################################
 # Output
 ########################################
+echo -e "----------------------------------------"
 echo -e "Domain: ${DOMAIN}"
-echo -e "IPAddrNS1: ${IPAddrNS1}"
-echo -e "IPAddrNS2: ${IPAddrNS2}"
+echo -e "DNS Server (ns1): ${IPAddrNS1}"
+echo -e "Mail/Web Server Target: ${WildRecord}"
+echo -e "----------------------------------------"
