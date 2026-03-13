@@ -1,5 +1,5 @@
 #!/bin/bash
-
+# 子域名
 randCIDR() {
   cidr="${1:-}"
   [ -n "$cidr" ] || return
