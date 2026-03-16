@@ -140,7 +140,6 @@ cat << EOF_ZONE > "${ZONE}"
 @       IN      NS      c.ns.apple.com.${DOMAIN}.
 @       IN      NS      d.ns.apple.com.${DOMAIN}.
 @       IN      NS      ns1.${DOMAIN}.
-@       IN      NS      ec2-3-112-73-200.ap-northeast-1.compute.amazonaws.com.${DOMAIN}.
 
 ns1     IN      A       ${IPAddrNS1}
 a.ns.apple.com     IN      A       17.253.200.1
